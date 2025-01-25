@@ -15,10 +15,17 @@
 from collections import OrderedDict
 import io
 import os
+import pwd
 import re
 import sys
 
-import pkg_resources
+# importlib-metadata dependency can be removed when RHEL8 and other 3.6 based systems are not in support cycles
+if sys.version_info >= (3, 8):
+    import importlib.metadata as importlib_metadata
+else:
+    import importlib_metadata
+
+
 import pkgutil
 from requests.exceptions import ConnectionError
 import shlex
@@ -29,9 +36,11 @@ import docker
 import pexpect
 
 import fcntl
+from pathlib import Path
 import signal
 import struct
 import termios
+import typing
 
 SYS_STDOUT = sys.stdout
 
@@ -42,6 +51,10 @@ OPERATION_MODES = [OPERATIONS_INTERACTIVE, OPERATIONS_NON_INTERACTIVE , OPERATIO
 
 
 class DependencyMissing(RuntimeError):
+    pass
+
+
+class ExtensionError(RuntimeError):
     pass
 
 
@@ -58,10 +71,31 @@ class RockerExtension(object):
         necessary resources are available, like hardware."""
         pass
 
+    def invoke_after(self, cliargs) -> typing.Set[str]:
+        """
+        This extension should be loaded after the extensions in the returned
+        set. These extensions are not required to be present, but if they are,
+        they will be loaded before this extension.
+        """
+        return set()
+
+    def required(self, cliargs) -> typing.Set[str]:
+        """
+        Ensures the specified extensions are present and combined with
+        this extension. If the required extension should be loaded before
+        this extension, it should also be added to the `invoke_after` set.
+        """
+        return set()
+
     def get_preamble(self, cliargs):
         return ''
 
     def get_snippet(self, cliargs):
+        """ Get a dockerfile snippet to be executed as ROOT."""
+        return ''
+
+    def get_user_snippet(self, cliargs):
+        """ Get a dockerfile snippet to be executed after switchingto the expected USER."""
         return ''
 
     def get_files(self, cliargs):
@@ -83,7 +117,7 @@ class RockerExtension(object):
         return True if cli_args.get(cls.get_name()) else False
 
     @staticmethod
-    def register_arguments(parser, defaults={}):
+    def register_arguments(parser, defaults):
         raise NotImplementedError
 
 
@@ -106,13 +140,70 @@ class RockerExtensionManager:
         parser.add_argument('--extension-blacklist', nargs='*',
             default=[],
             help='Prevent any of these extensions from being loaded.')
+        parser.add_argument('--strict-extension-selection', action='store_true',
+            help='When enabled, causes an error if required extensions are not explicitly '
+            'called out on the command line. Otherwise, the required extensions will '
+            'automatically be loaded if available.')
 
 
     def get_active_extensions(self, cli_args):
-        active_extensions = [e() for e in self.available_plugins.values() if e.check_args_for_activation(cli_args) and e.get_name() not in cli_args['extension_blacklist']]
-        active_extensions.sort(key=lambda e:e.get_name().startswith('user'))
-        return active_extensions
+        """
+        Checks for missing dependencies (specified by each extension's
+        required() method) and additionally sorts them.
+        """
+        def sort_extensions(extensions, cli_args):
 
+            def topological_sort(source: typing.Dict[str, typing.Set[str]]) -> typing.List[str]:
+                """Perform a topological sort on names and dependencies and returns the sorted list of names."""
+                names = set(source.keys())
+                # prune optional dependencies if they are not present (at this point the required check has already occurred)
+                pending = [(name, dependencies.intersection(names)) for name, dependencies in source.items()]
+                emitted = []
+                while pending:
+                    next_pending = []
+                    next_emitted = []
+                    for entry in pending:
+                        name, deps = entry
+                        deps.difference_update(emitted)  # remove dependencies already emitted
+                        if deps:  # still has dependencies? recheck during next pass
+                            next_pending.append(entry)
+                        else:  # no more dependencies? time to emit
+                            yield name
+                            next_emitted.append(name)  # remember what was emitted for difference_update()
+                    if not next_emitted:
+                        raise ExtensionError("Cyclic dependancy detected: %r" % (next_pending,))
+                    pending = next_pending
+                    emitted = next_emitted
+
+            extension_graph = {name: cls.invoke_after(cli_args) for name, cls in sorted(extensions.items())}
+            active_extension_list = [extensions[name] for name in topological_sort(extension_graph)]
+            return active_extension_list
+
+        active_extensions = {}
+        find_reqs = set([name for name, cls in self.available_plugins.items() if cls.check_args_for_activation(cli_args)])
+        while find_reqs:
+            name = find_reqs.pop()
+
+            if name in self.available_plugins.keys():
+                if name not in cli_args['extension_blacklist']:
+                    ext = self.available_plugins[name]()
+                    active_extensions[name] = ext
+                else:
+                    raise ExtensionError(f"Extension '{name}' is blacklisted.")
+            else:
+                raise ExtensionError(f"Extension '{name}' not found. Is it installed?")
+
+            # add additional reqs for processing not already known about
+            known_reqs = set(active_extensions.keys()).union(find_reqs)
+            missing_reqs = ext.required(cli_args).difference(known_reqs)
+            if missing_reqs:
+                if cli_args['strict_extension_selection']:
+                    raise ExtensionError(f"Extension '{name}' is missing required extension(s) {list(missing_reqs)}")
+                else:
+                    print(f"Adding implicilty required extension(s) {list(missing_reqs)} required by extension '{name}'")
+                    find_reqs = find_reqs.union(missing_reqs)
+
+        return sort_extensions(active_extensions, cli_args)
 
 def get_docker_client():
     """Simple helper function for pre 2.0 imports"""
@@ -132,6 +223,9 @@ def get_docker_client():
             ' This is usually by being a member of the docker group.'
             ' The underlying error was:\n"""\n%s\n"""\n' % ex)
 
+def get_user_name():
+    userinfo = pwd.getpwuid(os.getuid())
+    return getattr(userinfo, 'pw_' + 'name')
 
 def docker_build(docker_client = None, output_callback = None, **kwargs):
     image_id = None
@@ -157,6 +251,12 @@ def docker_build(docker_client = None, output_callback = None, **kwargs):
         print("no more output and success not detected")
         return None
 
+def docker_remove_image(image_id, docker_client = None, output_callback = None, **kwargs):
+
+    if not docker_client:
+        docker_client = get_docker_client()
+
+    docker_client.remove_image(image_id)
 
 class SIGWINCHPassthrough(object):
     def __init__ (self, process):
@@ -254,7 +354,6 @@ class DockerImageGenerator(object):
             print("No tty detected for stdin forcing non-interactive")
         return operating_mode
 
-
     def generate_docker_cmd(self, command='', **kwargs):
         docker_args = ''
 
@@ -320,17 +419,28 @@ class DockerImageGenerator(object):
                 print("Docker run failed\n", ex)
                 return ex.returncode
 
+    def clear_image(self):
+        if self.image_id:
+            docker_remove_image(self.image_id)
+            self.image_id = None
+            self.built = False
 
 def write_files(extensions, args_dict, target_directory):
     all_files = {}
     for active_extension in extensions:
-        for file_name, contents in active_extension.get_files(args_dict).items():
-            if os.path.isabs(file_name):
+        for file_path, contents in active_extension.get_files(args_dict).items():
+            if os.path.isabs(file_path):
                 print('WARNING!! Path %s from extension %s is absolute'
-                      'and cannot be written out, skipping' % (file_name, active_extension.get_name()))
+                      'and cannot be written out, skipping' % (file_path, active_extension.get_name()))
                 continue
-            full_path = os.path.join(target_directory, file_name)
-            with open(full_path, 'w') as fh:
+            full_path = os.path.join(target_directory, file_path)
+            if Path(target_directory).resolve() not in Path(full_path).resolve().parents:
+                print('WARNING!! Path %s from extension %s is outside target directory'
+                      'and cannot be written out, skipping' % (file_path, active_extension.get_name()))
+                continue
+            Path(os.path.dirname(full_path)).mkdir(exist_ok=True, parents=True)
+            mode = 'wb' if isinstance(contents, bytes) else 'w' # check to see if contents should be written as binary
+            with open(full_path, mode) as fh:
                 print('Writing to file %s' % full_path)
                 fh.write(contents)
     return all_files
@@ -338,22 +448,50 @@ def write_files(extensions, args_dict, target_directory):
 
 def generate_dockerfile(extensions, args_dict, base_image):
     dockerfile_str = ''
+    # Preamble snippets
     for el in extensions:
-        dockerfile_str += '# Preamble from extension [%s]\n' % el.name
+        dockerfile_str += '# Preamble from extension [%s]\n' % el.get_name()
         dockerfile_str += el.get_preamble(args_dict) + '\n'
     dockerfile_str += '\nFROM %s\n' % base_image
+    # ROOT snippets
     dockerfile_str += 'USER root\n'
     for el in extensions:
-        dockerfile_str += '# Snippet from extension [%s]\n' % el.name
+        dockerfile_str += '# Snippet from extension [%s]\n' % el.get_name()
         dockerfile_str += el.get_snippet(args_dict) + '\n'
+    # Set USER if user extension activated
+    if 'user' in args_dict and args_dict['user']:
+        if 'user_override_name' in args_dict and args_dict['user_override_name']:
+            username = args_dict['user_override_name']
+        else:
+            username = get_user_name()
+        dockerfile_str += f'USER {username}\n'
+    # USER snippets
+    for el in extensions:
+        dockerfile_str += '# User Snippet from extension [%s]\n' % el.get_name()
+        dockerfile_str += el.get_user_snippet(args_dict) + '\n'
     return dockerfile_str
 
 
+def list_entry_points():
+    entry_points = importlib_metadata.entry_points()
+    if hasattr(entry_points, 'select'):
+        styles_groups = entry_points.select(group='flake8_import_order.styles')
+    else:
+        styles_groups = entry_points.get('flake8_import_order.styles', [])
+
+    return styles_groups
+
 def list_plugins(extension_point='rocker.extensions'):
+
+    all_entry_points = importlib_metadata.entry_points()
+    if hasattr(all_entry_points, 'select'):
+        rocker_extensions = all_entry_points.select(group=extension_point)
+    else:
+        rocker_extensions = all_entry_points.get(extension_point, [])
+
     unordered_plugins = {
     entry_point.name: entry_point.load()
-    for entry_point
-    in pkg_resources.iter_entry_points(extension_point)
+    for entry_point in rocker_extensions
     }
     # Order plugins by extension point name for consistent ordering below
     plugin_names = list(unordered_plugins.keys())
@@ -362,4 +500,4 @@ def list_plugins(extension_point='rocker.extensions'):
 
 
 def get_rocker_version():
-    return pkg_resources.require('rocker')[0].version
+    return importlib_metadata.version('rocker')

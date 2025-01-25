@@ -172,7 +172,15 @@ CMD glmark2 --validate
 
 
         preamble = p.get_preamble(mock_cliargs)
-        self.assertIn('FROM nvidia/opengl:1.0-glvnd-devel-', preamble)
+        self.assertIn('FROM nvidia/opengl:1.0-glvnd-devel-ubuntu18.04', preamble)
+
+        mock_cliargs = {'base_image': 'ubuntu:jammy'}
+        preamble = p.get_preamble(mock_cliargs)
+        self.assertIn('FROM nvidia/opengl:1.0-glvnd-devel-ubuntu22.04', preamble)
+
+        mock_cliargs = {'base_image': 'ubuntu:jammy', 'nvidia_glvnd_version': '20.04'}
+        preamble = p.get_preamble(mock_cliargs)
+        self.assertIn('FROM nvidia/opengl:1.0-glvnd-devel-ubuntu20.04', preamble)
 
         docker_args = p.get_docker_args(mock_cliargs)
         #TODO(tfoote) restore with #37 self.assertIn(' -e DISPLAY -e TERM', docker_args)
@@ -184,6 +192,21 @@ CMD glmark2 --validate
             self.assertIn(' --gpus all', docker_args)
         else:
             self.assertIn(' --runtime=nvidia', docker_args)
+
+        mock_cliargs = {'nvidia': 'auto'}
+        docker_args = p.get_docker_args(mock_cliargs)
+        if get_docker_version() >= Version("19.03"):
+            self.assertIn(' --gpus all', docker_args)
+        else:
+            self.assertIn(' --runtime=nvidia', docker_args)
+
+        mock_cliargs = {'nvidia': 'gpus'}
+        docker_args = p.get_docker_args(mock_cliargs)
+        self.assertIn(' --gpus all', docker_args)
+
+        mock_cliargs = {'nvidia': 'runtime'}
+        docker_args = p.get_docker_args(mock_cliargs)
+        self.assertIn(' --runtime=nvidia', docker_args)
 
 
     def test_no_nvidia_glmark2(self):
@@ -227,15 +250,23 @@ CMD glmark2 --validate
             p.get_environment_subs(mock_cliargs)
         self.assertEqual(cm.exception.code, 1)
 
+@pytest.mark.docker
+@pytest.mark.nvidia # Technically not needing nvidia but too resource intensive for main runs
 class CudaTest(unittest.TestCase):
     @classmethod
     def setUpClass(self):
         client = get_docker_client()
         self.dockerfile_tags = []
-        for distro_version in ['focal', 'jammy']:
+        for (distro_name, distro_version) in [
+            ('ubuntu','focal'),
+            ('ubuntu','jammy'),
+            ('ubuntu','noble'),
+            ('debian','bookworm'),
+            ('debian','bullseye'),
+            ]:
             dockerfile = """
-FROM ubuntu:%(distro_version)s
-CMD dpkg -s cuda
+FROM %(distro_name)s:%(distro_version)s
+CMD dpkg -s cuda-toolkit
 """
             dockerfile_tag = 'testfixture_%s_cuda' % distro_version
             iof = StringIO((dockerfile % locals()).encode())
@@ -257,24 +288,22 @@ CMD dpkg -s cuda
         em.Interpreter._wasProxyInstalled = False
 
 
-    @pytest.mark.docker
     def test_no_cuda(self):
         for tag in self.dockerfile_tags:
             dig = DockerImageGenerator([], {}, tag)
             self.assertEqual(dig.build(), 0)
             self.assertNotEqual(dig.run(), 0)
+            dig.clear_image()
 
-    @pytest.mark.nvidia
-    @pytest.mark.x11
-    @pytest.mark.docker
-    def test_cuda(self):
+    def test_cuda_install(self):
         plugins = list_plugins()
-        desired_plugins = ['x11', 'nvidia', 'cuda'] #TODO(Tfoote) encode the x11 dependency into the plugin and remove from test here
+        desired_plugins = ['cuda']
         active_extensions = [e() for e in plugins.values() if e.get_name() in desired_plugins]
         for tag in self.dockerfile_tags:
             dig = DockerImageGenerator(active_extensions, {}, tag)
             self.assertEqual(dig.build(), 0)
             self.assertEqual(dig.run(), 0)
+            dig.clear_image()
 
     def test_cuda_env_subs(self):
         plugins = list_plugins()

@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import os
-import em
 import getpass
 import tempfile
 from packaging.version import Version
@@ -27,11 +26,36 @@ from .os_detector import detect_os
 from .extensions import name_to_argument
 from .core import get_docker_client
 from .core import RockerExtension
+from .em import empy_expand
+
+GLVND_VERSION_POLICY_LATEST_LTS='latest_lts'
+
+NVIDIA_GLVND_VALID_VERSIONS=['16.04', '18.04','20.04', '22.04', '24.04']
 
 def get_docker_version():
     docker_version_raw = get_docker_client().version()['Version']
     # Fix for version 17.09.0-ce
     return Version(docker_version_raw.split('-')[0])
+
+def glvnd_version_from_policy(image_version, policy):
+    # Default policy GLVND_VERSION_POLICY_LATEST_LTS
+    if not policy:
+        policy = GLVND_VERSION_POLICY_LATEST_LTS
+
+    if policy == GLVND_VERSION_POLICY_LATEST_LTS:
+        if image_version in ['16.04', '16.10', '17.04', '17.10']:
+            return '16.04'
+        if image_version in ['18.04', '18.10', '19.04', '19.10']:
+            return '18.04'
+        if image_version in ['20.04', '20.10', '21.04', '21.10']:
+            return '20.04'
+        if image_version in ['22.04', '22.10', '23.04', '23.10']:
+            return '22.04'
+        # 24.04 is not available yet
+        # if image_version in ['24.04', '24.10', '25.04', '25.10']:
+        #     return '24.04'
+        return '22.04'
+    return None
 
 class X11(RockerExtension):
     @staticmethod
@@ -70,7 +94,7 @@ class X11(RockerExtension):
             raise ex
 
     @staticmethod
-    def register_arguments(parser, defaults={}):
+    def register_arguments(parser, defaults):
         parser.add_argument(name_to_argument(X11.get_name()),
             action='store_true',
             default=defaults.get(X11.get_name(), None),
@@ -86,7 +110,7 @@ class Nvidia(RockerExtension):
         self._env_subs = None
         self.name = Nvidia.get_name()
         self.supported_distros = ['Ubuntu', 'Debian GNU/Linux']
-        self.supported_versions = ['16.04', '18.04', '20.04', '10', '22.04']
+        self.supported_versions = ['16.04', '18.04', '20.04', '10', '22.04', '24.04']
 
 
     def get_environment_subs(self, cliargs={}):
@@ -94,7 +118,7 @@ class Nvidia(RockerExtension):
             self._env_subs = {}
             self._env_subs['user_id'] = os.getuid()
             self._env_subs['username'] = getpass.getuser()
-        
+
         # non static elements test every time
         detected_os = detect_os(cliargs['base_image'], print, nocache=cliargs.get('nocache', False))
         if detected_os is None:
@@ -111,28 +135,47 @@ class Nvidia(RockerExtension):
             print("WARNING distro %s version %s not in supported list by Nvidia supported versions" % (dist, ver), self.supported_versions)
             sys.exit(1)
             # TODO(tfoote) add a standard mechanism for checking preconditions and disabling plugins
+        nvidia_glvnd_version = cliargs.get('nvidia_glvnd_version', None)
+        if not nvidia_glvnd_version:
+            nvidia_glvnd_version = glvnd_version_from_policy(ver, cliargs.get('nvidia_glvnd_policy', None) )
+        self._env_subs['nvidia_glvnd_version'] = nvidia_glvnd_version
 
         return self._env_subs
 
     def get_preamble(self, cliargs):
         preamble = pkgutil.get_data('rocker', 'templates/%s_preamble.Dockerfile.em' % self.name).decode('utf-8')
-        return em.expand(preamble, self.get_environment_subs(cliargs))
+        return empy_expand(preamble, self.get_environment_subs(cliargs))
 
     def get_snippet(self, cliargs):
         snippet = pkgutil.get_data('rocker', 'templates/%s_snippet.Dockerfile.em' % self.name).decode('utf-8')
-        return em.expand(snippet, self.get_environment_subs(cliargs))
+        return empy_expand(snippet, self.get_environment_subs(cliargs))
 
     def get_docker_args(self, cliargs):
+        force_flag = cliargs.get('nvidia', None)
+        if force_flag == 'runtime':
+            return "  --runtime=nvidia"
+        if force_flag == 'gpus':
+            return "  --gpus all"
         if get_docker_version() >= Version("19.03"):
             return "  --gpus all"
         return "  --runtime=nvidia"
 
     @staticmethod
-    def register_arguments(parser, defaults={}):
+    def register_arguments(parser, defaults):
         parser.add_argument(name_to_argument(Nvidia.get_name()),
-            action='store_true',
+            choices=['auto', 'runtime', 'gpus'],
+            nargs='?',
+            const='auto',
             default=defaults.get(Nvidia.get_name(), None),
-            help="Enable nvidia")
+            help="Enable nvidia. Default behavior is to pick flag based on docker version.")
+        parser.add_argument('--nvidia-glvnd-version',
+            choices=NVIDIA_GLVND_VALID_VERSIONS,
+            default=defaults.get('nvidia-glvnd-version', None),
+            help="Explicitly select an nvidia glvnd version")
+        parser.add_argument('--nvidia-glvnd-policy',
+            choices=[GLVND_VERSION_POLICY_LATEST_LTS],
+            default=defaults.get('nvidia-glvnd-policy', GLVND_VERSION_POLICY_LATEST_LTS),
+            help="Set an nvidia glvnd version policy if version is unset")
 
 class Cuda(RockerExtension):
     @staticmethod
@@ -143,7 +186,7 @@ class Cuda(RockerExtension):
         self._env_subs = None
         self.name = Cuda.get_name()
         self.supported_distros = ['Ubuntu', 'Debian GNU/Linux']
-        self.supported_versions = ['20.04', '22.04', '18.04', '11'] # Debian 11
+        self.supported_versions = ['20.04', '22.04', '24.04', '11', '12'] # Debian 11 and 12
 
     def get_environment_subs(self, cliargs={}):
         if not self._env_subs:
@@ -177,21 +220,19 @@ class Cuda(RockerExtension):
     def get_preamble(self, cliargs):
         return ''
         # preamble = pkgutil.get_data('rocker', 'templates/%s_preamble.Dockerfile.em' % self.name).decode('utf-8')
-        # return em.expand(preamble, self.get_environment_subs(cliargs))
+        # return empy_expand(preamble, self.get_environment_subs(cliargs))
 
     def get_snippet(self, cliargs):
         snippet = pkgutil.get_data('rocker', 'templates/%s_snippet.Dockerfile.em' % self.name).decode('utf-8')
-        return em.expand(snippet, self.get_environment_subs(cliargs))
+        return empy_expand(snippet, self.get_environment_subs(cliargs))
 
     def get_docker_args(self, cliargs):
         return ""
         # Runtime requires --nvidia option too
 
     @staticmethod
-    def register_arguments(parser, defaults={}):
+    def register_arguments(parser, defaults):
         parser.add_argument(name_to_argument(Cuda.get_name()),
             action='store_true',
             default=defaults.get('cuda', None),
             help="Install cuda and nvidia-cuda-dev into the container")
-
-

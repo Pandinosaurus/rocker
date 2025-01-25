@@ -48,15 +48,17 @@ class TestFileInjection(RockerExtension):
 
     def get_files(self, cliargs):
         all_files = {}
-        all_files['test_file.txt'] = """The quick brown fox jumped over the lazy dog.
-%s""" % cliargs
+        all_files['test_file.txt'] = """The quick brown fox jumped over the lazy dog. %s""" % cliargs
+        all_files['path/to/test_file.txt'] = """The quick brown fox jumped over the lazy dog. %s""" % cliargs
+        all_files['test_file.bin'] = bytes("""The quick brown fox jumped over the lazy dog. %s""" % cliargs, 'utf-8')
+        all_files['../outside/path/to/test_file.txt'] = """Path outside directory should be skipped"""
         all_files['/absolute.txt'] = """Absolute file path should be skipped"""
         return all_files
 
 
 
     @staticmethod
-    def register_arguments(parser, defaults={}):
+    def register_arguments(parser, defaults):
         parser.add_argument('--test-file-injection',
             action='store_true',
             default=defaults.get('test_file_injection', False),
@@ -89,4 +91,17 @@ class FileInjectionExtensionTest(unittest.TestCase):
                 self.assertIn('test_key', content)
                 self.assertIn('test_value', content)
 
+            with open(os.path.join(td, 'path/to/test_file.txt'), 'r') as fh:
+                content = fh.read()
+                self.assertIn('quick brown', content)
+                self.assertIn('test_key', content)
+                self.assertIn('test_value', content)
+
+            with open(os.path.join(td, 'test_file.bin'), 'r') as fh: # this particular binary file can be read in text mode
+                content = fh.read()
+                self.assertIn('quick brown', content)
+                self.assertIn('test_key', content)
+                self.assertIn('test_value', content)
+
+            self.assertFalse(os.path.exists('../outside/path/to/test_file.txt'))
             self.assertFalse(os.path.exists('/absolute.txt'))

@@ -3,10 +3,14 @@
 import os
 from setuptools import setup
 
+# importlib-metadata dependency can be removed when RHEL8 and other 3.6 based systems are not in support cycles
+
 install_requires = [
     'empy',
+    'importlib-metadata; python_version < "3.8"',
     'pexpect',
     'packaging',
+    'urllib3',
 ]
 
 # docker API used to be in a package called `docker-py` before the 2.0 release
@@ -31,7 +35,7 @@ install_requires.append(docker_package)
 
 kwargs = {
     'name': 'rocker',
-    'version': '0.2.10',
+    'version': '0.2.18',
     'packages': ['rocker'],
     'package_dir': {'': 'src'},
     'package_data': {'rocker': ['templates/*.em']},
@@ -39,7 +43,7 @@ kwargs = {
         'console_scripts': [
             'rocker = rocker.cli:main',
             'detect_docker_image_os = rocker.cli:detect_image_os',
-	    ],
+        ],
         'rocker.extensions': [
             'cuda = rocker.nvidia_extension:Cuda',
             'devices = rocker.extensions:Devices',
@@ -47,19 +51,25 @@ kwargs = {
             'env = rocker.extensions:Environment',
             'expose = rocker.extensions:Expose',
             'git = rocker.git_extension:Git',
+            'group_add = rocker.extensions:GroupAdd',
             'home = rocker.extensions:HomeDir',
+            'hostname = rocker.extensions:Hostname',
+            'ipc = rocker.extensions:Ipc',
             'name = rocker.extensions:Name',
             'network = rocker.extensions:Network',
             'nvidia = rocker.nvidia_extension:Nvidia',
             'port = rocker.extensions:Port',
             'privileged = rocker.extensions:Privileged',
             'pulse = rocker.extensions:PulseAudio',
+            'rmw = rocker.rmw_extension:RMW',
+            'shm_size = rocker.extensions:ShmSize',
             'ssh = rocker.ssh_extension:Ssh',
+            'ulimit = rocker.ulimit_extension:Ulimit',
             'user = rocker.extensions:User',
             'volume = rocker.volume_extension:Volume',
             'x11 = rocker.nvidia_extension:X11',
         ]
-	},
+    },
     'author': 'Tully Foote',
     'author_email': 'tfoote@osrfoundation.org',
     'keywords': ['Docker'],
@@ -83,4 +93,3 @@ kwargs = {
 }
 
 setup(**kwargs)
-

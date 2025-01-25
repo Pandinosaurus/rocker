@@ -36,7 +36,7 @@ def plugin_load_parser_correctly(plugin):
     """A helper function to test that the plugins at least
     register an option for their own name."""
     parser = argparse.ArgumentParser(description='test_parser')
-    plugin.register_arguments(parser)
+    plugin.register_arguments(parser, {})
     argument_name = name_to_argument(plugin.get_name())
     for action in parser._actions:
         option_strings = getattr(action, 'option_strings', [])
@@ -113,6 +113,40 @@ class HomeExtensionTest(unittest.TestCase):
         self.assertEqual(p.get_preamble(mock_cliargs), '')
         args = p.get_docker_args(mock_cliargs)
         self.assertTrue('-v %s:%s' % (Path.home(), Path.home()) in args)
+
+
+class IpcExtensionTest(unittest.TestCase):
+
+    def setUp(self):
+        # Work around interference between empy Interpreter
+        # stdout proxy and test runner. empy installs a proxy on stdout
+        # to be able to capture the information.
+        # And the test runner creates a new stdout object for each test.
+        # This breaks empy as it assumes that the proxy has persistent
+        # between instances of the Interpreter class
+        # empy will error with the exception
+        # "em.Error: interpreter stdout proxy lost"
+        em.Interpreter._wasProxyInstalled = False
+
+    @pytest.mark.docker
+    def test_ipc_extension(self):
+        plugins = list_plugins()
+        ipc_plugin = plugins['ipc']
+        self.assertEqual(ipc_plugin.get_name(), 'ipc')
+
+        p = ipc_plugin()
+        self.assertTrue(plugin_load_parser_correctly(ipc_plugin))
+        
+        mock_cliargs = {'ipc': 'none'}
+        self.assertEqual(p.get_snippet(mock_cliargs), '')
+        self.assertEqual(p.get_preamble(mock_cliargs), '')
+        args = p.get_docker_args(mock_cliargs)
+        self.assertTrue('--ipc none' in args)
+
+        mock_cliargs = {'ipc': 'host'}
+        args = p.get_docker_args(mock_cliargs)
+        self.assertTrue('--ipc host' in args)
+
 
 class NetworkExtensionTest(unittest.TestCase):
 
@@ -243,6 +277,37 @@ class NameExtensionTest(unittest.TestCase):
         args = p.get_docker_args(mock_cliargs)
         self.assertTrue('--name docker_name' in args)
 
+class HostnameExtensionTest(unittest.TestCase):
+
+    def setUp(self):
+        # Work around interference between empy Interpreter
+        # stdout proxy and test runner. empy installs a proxy on stdout
+        # to be able to capture the information.
+        # And the test runner creates a new stdout object for each test.
+        # This breaks empy as it assumes that the proxy has persistent
+        # between instances of the Interpreter class
+        # empy will error with the exception
+        # "em.Error: interpreter stdout proxy lost"
+        em.Interpreter._wasProxyInstalled = False
+
+    def test_name_extension(self):
+        plugins = list_plugins()
+        name_plugin = plugins['hostname']
+        self.assertEqual(name_plugin.get_name(), 'hostname')
+
+        p = name_plugin()
+        self.assertTrue(plugin_load_parser_correctly(name_plugin))
+
+        mock_cliargs = {'hostname': 'none'}
+        self.assertEqual(p.get_snippet(mock_cliargs), '')
+        self.assertEqual(p.get_preamble(mock_cliargs), '')
+        args = p.get_docker_args(mock_cliargs)
+        self.assertTrue('--hostname none' in args)
+
+        mock_cliargs = {'hostname': 'docker-hostname'}
+        args = p.get_docker_args(mock_cliargs)
+        self.assertTrue('--hostname docker-hostname' in args)
+
 
 class PrivilegedExtensionTest(unittest.TestCase):
 
@@ -317,9 +382,25 @@ class UserExtensionTest(unittest.TestCase):
         self.assertFalse('mkhomedir_helper' in p.get_snippet(home_active_cliargs))
 
         user_override_active_cliargs = mock_cliargs
+        user_override_active_cliargs['user_preserve_groups'] = []
+        snippet_result = p.get_snippet(user_override_active_cliargs)
+        self.assertTrue('usermod -aG' in snippet_result)
+
+        user_override_active_cliargs = mock_cliargs
+        user_override_active_cliargs['user_preserve_groups'] = ['cdrom', 'audio']
+        snippet_result = p.get_snippet(user_override_active_cliargs)
+        self.assertTrue('cdrom' in snippet_result)
+        self.assertTrue('audio' in snippet_result)
+
+        user_override_active_cliargs = mock_cliargs
+        user_override_active_cliargs['user_preserve_groups'] = []
+        user_override_active_cliargs['user_preserve_groups_permissive'] = True
+        snippet_result = p.get_snippet(user_override_active_cliargs)
+        self.assertTrue('usermod -aG' in snippet_result)
+        self.assertTrue('user-preserve-group-permissive Enabled' in snippet_result)
+
         user_override_active_cliargs['user_override_name'] = 'testusername'
         snippet_result = p.get_snippet(user_override_active_cliargs)
-        self.assertTrue('USER testusername' in snippet_result)
         self.assertTrue('WORKDIR /home/testusername' in snippet_result)
         self.assertTrue('userdel -r' in snippet_result)
 
@@ -373,6 +454,7 @@ RUN useradd test -u{uid}
         self.assertTrue(exit_code == 0, f"Build failed with exit code {exit_code}")
         run_exit_code = dig.run(**build_args)
         self.assertTrue(run_exit_code == 0, f"Run failed with exit code {run_exit_code}")
+        dig.clear_image()
 
 
         # Test colliding UID and name
@@ -383,6 +465,7 @@ RUN useradd test -u{uid}
         self.assertTrue(exit_code == 0, f"Build failed with exit code {exit_code}")
         run_exit_code = dig.run(**build_args)
         self.assertTrue(run_exit_code == 0, f"Run failed with exit code {run_exit_code}")
+        dig.clear_image()
 
 
 class PulseExtensionTest(unittest.TestCase):
@@ -500,3 +583,69 @@ class EnvExtensionTest(unittest.TestCase):
         self.assertEqual(p.get_snippet(mock_cliargs), '')
         self.assertEqual(p.get_preamble(mock_cliargs), '')
         self.assertEqual(p.get_docker_args(mock_cliargs), ' --env-file foo --env-file bar')
+
+
+class GroupAddExtensionTest(unittest.TestCase):
+
+    def setUp(self):
+        # Work around interference between empy Interpreter
+        # stdout proxy and test runner. empy installs a proxy on stdout
+        # to be able to capture the information.
+        # And the test runner creates a new stdout object for each test.
+        # This breaks empy as it assumes that the proxy has persistent
+        # between instances of the Interpreter class
+        # empy will error with the exception
+        # "em.Error: interpreter stdout proxy lost"
+        em.Interpreter._wasProxyInstalled = False
+
+    @pytest.mark.docker
+    def test_group_add_extension(self):
+        plugins = list_plugins()
+        group_add_plugin = plugins['group_add']
+        self.assertEqual(group_add_plugin.get_name(), 'group_add')
+
+        p = group_add_plugin()
+        self.assertTrue(plugin_load_parser_correctly(group_add_plugin))
+
+        mock_cliargs = {}
+        self.assertEqual(p.get_snippet(mock_cliargs), '')
+        self.assertEqual(p.get_preamble(mock_cliargs), '')
+        args = p.get_docker_args(mock_cliargs)
+        self.assertNotIn('--group_add', args)
+
+        mock_cliargs = {'group_add': ['sudo', 'docker']}
+        args = p.get_docker_args(mock_cliargs)
+        self.assertIn('--group-add sudo', args)
+        self.assertIn('--group-add docker', args)
+
+class ShmSizeExtensionTest(unittest.TestCase):
+
+    def setUp(self):
+        # Work around interference between empy Interpreter
+        # stdout proxy and test runner. empy installs a proxy on stdout
+        # to be able to capture the information.
+        # And the test runner creates a new stdout object for each test.
+        # This breaks empy as it assumes that the proxy has persistent
+        # between instances of the Interpreter class
+        # empy will error with the exception
+        # "em.Error: interpreter stdout proxy lost"
+        em.Interpreter._wasProxyInstalled = False
+
+    @pytest.mark.docker
+    def test_shm_size_extension(self):
+        plugins = list_plugins()
+        shm_size_plugin = plugins['shm_size']
+        self.assertEqual(shm_size_plugin.get_name(), 'shm_size')
+
+        p = shm_size_plugin()
+        self.assertTrue(plugin_load_parser_correctly(shm_size_plugin))
+
+        mock_cliargs = {}
+        self.assertEqual(p.get_snippet(mock_cliargs), '')
+        self.assertEqual(p.get_preamble(mock_cliargs), '')
+        args = p.get_docker_args(mock_cliargs)
+        self.assertNotIn('--shm-size', args)
+
+        mock_cliargs = {'shm_size': '12g'}
+        args = p.get_docker_args(mock_cliargs)
+        self.assertIn('--shm-size 12g', args)

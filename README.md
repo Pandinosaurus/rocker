@@ -21,7 +21,7 @@ Whereas with `rocker` you can invoke your specific plugins and it will use multi
 
 
 
-## Know extensions
+## Known extensions
 
 Rocker supports extensions via entry points there are some built in but you can add your own.
 
@@ -38,7 +38,7 @@ You can get full details on the extensions from the main `rocker --help` command
 - pulse -- Mount pulse audio into the container
 - ssh -- Pass through ssh access to the container.
 
-As well as access to many of the docker arguments as well such as `device`, `env`, `volume`, `name`, `network`, and `privileged`.
+As well as access to many of the docker arguments as well such as `device`, `env`, `volume`, `name`, `network`, `ipc`, and `privileged`.
 
 ### Externally maintained extensions
 
@@ -47,8 +47,21 @@ Here's a list of public repositories with extensions.
 - Off-your-rocker: https://github.com/sloretz/off-your-rocker
 - mp_rocker: https://github.com/miguelprada/mp_rocker
 - ghrocker: https://github.com/tfoote/ghrocker
+- novnc_rocker: https://github.com/tfoote/novnc-rocker
+- template_rocker: https://github.com/blooop/template_rocker
+- deps_rocker: https://github.com/blooop/deps_rocker
+- pixi_rocker: https://github.com/blooop/pixi_rocker
+- conda_rocker: https://github.com/blooop/conda_rocker
+- palanteer_rocker: https://github.com/blooop/palanteer_rocker
+- lazygit_rocker: https://github.com/blooop/lazygit_rocker
 
 
+### Externally maintained rocker wrappers
+
+Here is a list of public repositories that wrap rocker and extend its functionality.  These tools are meant to be a drop in replacement of rocker so that all the existing behavior stays the same.
+
+- rockerc: https://github.com/blooop/rockerc wraps rocker to enable putting rocker commands into a yaml config file.
+- rockervsc: https://github.com/blooop/rockervsc wraps rocker so that a vscode instance attaches to the launched container.
 
 # Prerequisites
 
@@ -153,7 +166,7 @@ Then you can run pytest.
 Notes:
 
 - Make sure to use the python3 instance of pytest from inside the environment.
-- The tests include an nvidia test which assumes you're using a machine with an nvidia gpu.
+- The tests include an nvidia test which assumes you're using a machine with an nvidia gpu. To skip them use `-m "not nvidia"`
 
 
 # Example usage
@@ -168,15 +181,6 @@ Example usage with an iris
 After the ekf converges, 
 
 You can send a takeoff command and then click to command the vehicle to fly to a point on the map.
-
-
-## Fly a plane
-
-Example usage with a plane 
-
-    rocker --nvidia --x11 --user --home --pull --pulse tfoote/drone_demo roslaunch sitl_launcher plane_demo.launch world_name:=worlds/plane.world gui:=false
-
-In QGroundControl go ahead and make a mission, upload it, and then start the mission.
 
 ## ROS 2 rviz
 

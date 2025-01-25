@@ -20,6 +20,7 @@ from .core import DockerImageGenerator
 from .core import get_rocker_version
 from .core import RockerExtensionManager
 from .core import DependencyMissing
+from .core import ExtensionError
 
 from .os_detector import detect_os
 
@@ -34,6 +35,7 @@ def main():
     parser.add_argument('--noexecute', action='store_true', help='Deprecated')
     parser.add_argument('--nocache', action='store_true')
     parser.add_argument('--nocleanup', action='store_true', help='do not remove the docker container when stopped')
+    parser.add_argument('--persist-image', action='store_true', help='do not remove the docker image when stopped', default=False) #TODO(tfoote) Add a name to it if persisting
     parser.add_argument('--pull', action='store_true')
     parser.add_argument('--version', action='version',
         version='%(prog)s ' + get_rocker_version())
@@ -54,9 +56,11 @@ def main():
         args_dict['mode'] = OPERATIONS_DRY_RUN
         print('DEPRECATION Warning: --noexecute is deprecated for --mode dry-run please switch your usage by December 2020')
     
-    active_extensions = extension_manager.get_active_extensions(args_dict)
-    # Force user to end if present otherwise it will break other extensions
-    active_extensions.sort(key=lambda e:e.get_name().startswith('user'))
+    try:
+        active_extensions = extension_manager.get_active_extensions(args_dict)
+    except ExtensionError as e:
+        print(f"ERROR! {str(e)}")
+        return 1
     print("Active extensions %s" % [e.get_name() for e in active_extensions])
 
     base_image = args.image
@@ -65,10 +69,16 @@ def main():
     exit_code = dig.build(**vars(args))
     if exit_code != 0:
         print("Build failed exiting")
+        if not args_dict['persist_image']:
+            dig.clear_image()
         return exit_code
     # Convert command into string
     args.command = ' '.join(args.command)
-    return dig.run(**args_dict)
+    result = dig.run(**args_dict)
+    if not args_dict['persist_image']:
+        print(f'Clearing Image: {dig.image_id}s\nTo not clean up use --persist-images')
+        dig.clear_image()
+    return result
 
 
 def detect_image_os():

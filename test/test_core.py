@@ -17,15 +17,20 @@
 
 import argparse
 import em
+import os
+import pwd
 import pytest
 import unittest
 
 from itertools import chain
 
 from rocker.core import DockerImageGenerator
+from rocker.core import ExtensionError
 from rocker.core import list_plugins
 from rocker.core import get_docker_client
 from rocker.core import get_rocker_version
+from rocker.core import get_user_name
+from rocker.core import RockerExtension
 from rocker.core import RockerExtensionManager
 
 class RockerCoreTest(unittest.TestCase):
@@ -63,6 +68,7 @@ class RockerCoreTest(unittest.TestCase):
         self.assertEqual(dig.run('true'), 1)
         self.assertEqual(dig.build(), 0)
         self.assertEqual(dig.run('true'), 0)
+        dig.clear_image()
 
     @pytest.mark.docker
     def test_return_code_no_extensions(self):
@@ -70,6 +76,7 @@ class RockerCoreTest(unittest.TestCase):
         self.assertEqual(dig.build(), 0)
         self.assertEqual(dig.run('true'), 0)
         self.assertEqual(dig.run('false'), 1)
+        dig.clear_image()
 
     @pytest.mark.docker
     def test_return_code_multiple_extensions(self):
@@ -80,12 +87,14 @@ class RockerCoreTest(unittest.TestCase):
         self.assertEqual(dig.build(), 0)
         self.assertEqual(dig.run('true'), 0)
         self.assertEqual(dig.run('false'), 1)
+        dig.clear_image()
 
     @pytest.mark.docker
     def test_noexecute(self):
         dig = DockerImageGenerator([], {}, 'ubuntu:bionic')
         self.assertEqual(dig.build(), 0)
         self.assertEqual(dig.run('true', noexecute=True), 0)
+        dig.clear_image()
 
     @pytest.mark.docker
     def test_dry_run(self):
@@ -93,6 +102,7 @@ class RockerCoreTest(unittest.TestCase):
         self.assertEqual(dig.build(), 0)
         self.assertEqual(dig.run('true', mode='dry-run'), 0)
         self.assertEqual(dig.run('false', mode='dry-run'), 0)
+        dig.clear_image()
 
     @pytest.mark.docker
     def test_non_interactive(self):
@@ -100,6 +110,7 @@ class RockerCoreTest(unittest.TestCase):
         self.assertEqual(dig.build(), 0)
         self.assertEqual(dig.run('true', mode='non-interactive'), 0)
         self.assertEqual(dig.run('false', mode='non-interactive'), 1)
+        dig.clear_image()
 
     @pytest.mark.docker
     def test_device(self):
@@ -107,6 +118,7 @@ class RockerCoreTest(unittest.TestCase):
         self.assertEqual(dig.build(), 0)
         self.assertEqual(dig.run('true', devices=['/dev/random']), 0)
         self.assertEqual(dig.run('true', devices=['/dev/does_not_exist']), 0)
+        dig.clear_image()
 
     @pytest.mark.docker
     def test_network(self):
@@ -115,6 +127,7 @@ class RockerCoreTest(unittest.TestCase):
         networks = ['bridge', 'host', 'none']
         for n in networks:
             self.assertEqual(dig.run('true', network=n), 0)
+        dig.clear_image()
 
     @pytest.mark.docker
     def test_extension_manager(self):
@@ -128,9 +141,82 @@ class RockerCoreTest(unittest.TestCase):
         self.assertIn('non-interactive', help_str)
         self.assertIn('--extension-blacklist', help_str)
 
-        active_extensions = active_extensions = extension_manager.get_active_extensions({'user': True, 'ssh': True, 'extension_blacklist': ['ssh']})
-        self.assertEqual(len(active_extensions), 1)
-        self.assertEqual(active_extensions[0].get_name(), 'user')
+        self.assertRaises(ExtensionError,
+                          extension_manager.get_active_extensions,
+                          {'user': True, 'ssh': True, 'extension_blacklist': ['ssh']})
+
+    def test_strict_required_extensions(self):
+        class Foo(RockerExtension):
+            @classmethod
+            def get_name(cls):
+                return 'foo'
+
+        class Bar(RockerExtension):
+            @classmethod
+            def get_name(cls):
+                return 'bar'
+
+            def required(self, cli_args):
+                return {'foo'}
+
+        extension_manager = RockerExtensionManager()
+        extension_manager.available_plugins = {'foo': Foo, 'bar': Bar}
+
+        correct_extensions_args = {'strict_extension_selection': True, 'bar': True, 'foo': True, 'extension_blacklist': []}
+        extension_manager.get_active_extensions(correct_extensions_args)
+
+        incorrect_extensions_args = {'strict_extension_selection': True, 'bar': True, 'extension_blacklist': []}
+        self.assertRaises(ExtensionError,
+                          extension_manager.get_active_extensions, incorrect_extensions_args)
+
+    def test_implicit_required_extensions(self):
+        class Foo(RockerExtension):
+            @classmethod
+            def get_name(cls):
+                return 'foo'
+
+        class Bar(RockerExtension):
+            @classmethod
+            def get_name(cls):
+                return 'bar'
+
+            def required(self, cli_args):
+                return {'foo'}
+
+        extension_manager = RockerExtensionManager()
+        extension_manager.available_plugins = {'foo': Foo, 'bar': Bar}
+
+        implicit_extensions_args = {'strict_extension_selection': False, 'bar': True, 'extension_blacklist': []}
+        active_extensions = extension_manager.get_active_extensions(implicit_extensions_args)
+        self.assertEqual(len(active_extensions), 2)
+        # required extensions are not ordered, just check to make sure they are both present
+        if active_extensions[0].get_name() == 'foo':
+            self.assertEqual(active_extensions[1].get_name(), 'bar')
+        else:
+            self.assertEqual(active_extensions[0].get_name(), 'bar')
+            self.assertEqual(active_extensions[1].get_name(), 'foo')
+
+    def test_extension_sorting(self):
+        class Foo(RockerExtension):
+            @classmethod
+            def get_name(cls):
+                return 'foo'
+
+        class Bar(RockerExtension):
+            @classmethod
+            def get_name(cls):
+                return 'bar'
+
+            def invoke_after(self, cli_args):
+                return {'foo', 'absent_extension'}
+
+        extension_manager = RockerExtensionManager()
+        extension_manager.available_plugins = {'foo': Foo, 'bar': Bar}
+
+        args = {'bar': True, 'foo': True, 'extension_blacklist': []}
+        active_extensions = extension_manager.get_active_extensions(args)
+        self.assertEqual(active_extensions[0].get_name(), 'foo')
+        self.assertEqual(active_extensions[1].get_name(), 'bar')
 
     def test_docker_cmd_interactive(self):
         dig = DockerImageGenerator([], {}, 'ubuntu:bionic')
@@ -148,6 +234,63 @@ class RockerCoreTest(unittest.TestCase):
 
         self.assertNotIn('-it', dig.generate_docker_cmd(mode='non-interactive'))
 
+    def test_docker_user_detection(self):
+        userinfo = pwd.getpwuid(os.getuid())
+        username_detected =  getattr(userinfo, 'pw_' + 'name')
+        self.assertEqual(username_detected, get_user_name())
+
+    @pytest.mark.docker
+    def test_docker_user_setting(self):
+        parser = argparse.ArgumentParser()
+        extension_manager = RockerExtensionManager()
+        default_args = {}
+        extension_manager.extend_cli_parser(parser, default_args)
+        active_extensions = extension_manager.get_active_extensions({'user': True, 'extension_blacklist': ['ssh']})
+        dig = DockerImageGenerator(active_extensions, {'user_override_name': 'foo'}, 'ubuntu:bionic')
+
+        self.assertIn('USER root', dig.dockerfile)
+        self.assertNotIn('USER foo', dig.dockerfile)
+        dig = DockerImageGenerator(active_extensions, {'user': True, 'user_override_name': 'foo'}, 'ubuntu:bionic')
+        self.assertIn('USER root', dig.dockerfile)
+        self.assertIn('USER foo', dig.dockerfile)
+    
+    def test_docker_user_snippet(self):
+
+        root_snippet_content = "RUN echo run as root"
+        user_snippet_content = "RUN echo run as user"
+
+        class UserSnippet(RockerExtension):
+            def __init__(self):
+                self.name = 'usersnippet'
+
+            @classmethod
+            def get_name(cls):
+                return 'usersnippet'
+
+            def get_snippet(self, cli_args):
+                return root_snippet_content
+
+
+            def get_user_snippet(self, cli_args):
+                return user_snippet_content
+
+        extension_manager = RockerExtensionManager()
+        extension_manager.available_plugins = {'usersnippet': UserSnippet}
+        active_extensions = extension_manager.get_active_extensions({'user': True, 'usersnippet': UserSnippet, 'extension_blacklist': ['ssh']})
+        self.assertTrue(active_extensions)
+
+        # No user snippet
+        mock_cli_args = {'user': False, 'usersnippet': True, 'user_override_name': 'foo'}
+        dig = DockerImageGenerator(active_extensions, mock_cli_args, 'ubuntu:bionic')
+        self.assertIn('USER root', dig.dockerfile)
+        self.assertNotIn('USER foo', dig.dockerfile)
+
+        # User snippet added
+        mock_cli_args = {'user': True, 'usersnippet': True, 'user_override_name': 'foo'}
+        dig = DockerImageGenerator(active_extensions, mock_cli_args, 'ubuntu:bionic')
+        self.assertIn(root_snippet_content, dig.dockerfile)
+        self.assertIn('USER foo', dig.dockerfile)
+        self.assertIn(user_snippet_content, dig.dockerfile)
 
     def test_docker_cmd_nocleanup(self):
         dig = DockerImageGenerator([], {}, 'ubuntu:bionic')
